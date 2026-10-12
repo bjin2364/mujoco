@@ -177,6 +177,84 @@ def test_spring_mass_recover_mass():
   np.testing.assert_allclose(opt_params["mass"].value[0], 1.0, atol=1e-4)
 
 
+def test_report_videos_use_custom_rollout():
+  """Report videos are rendered with the given custom_rollout."""
+  spec, initial_state, control_ts, sensor_ts = _generate_data(
+      SPRING_MASS_XML,
+      ctrl_fn=lambda t: (5.0 * np.sin(2 * np.pi * 1.5 * t)).reshape(-1, 1),
+      duration=0.5,
+  )
+
+  params = sysid.ParameterDict()
+  params.add(
+      sysid.Parameter(
+          "mass",
+          nominal=1.0,
+          min_value=0.3,
+          max_value=3.0,
+          modifier=lambda s, p: setattr(s.body("ball"), "mass", p.value[0]),
+      )
+  )
+  params["mass"].value[:] = 2.0
+
+  # Masses of the models in each custom_rollout call, one list per call.
+  rollout_masses = []
+
+  def custom_rollout(*, param_dicts, **sysid_rollout_kwargs):
+    # A custom rollout receives the sysid_rollout kwargs plus `param_dicts`
+    # (one ParameterDict per model, see CustomRolloutFn). sysid_rollout does
+    # not accept `param_dicts`, so it is consumed here.
+    rollout_masses.append([p["mass"].value[0] for p in param_dicts])
+    return sysid.sysid_rollout(**sysid_rollout_kwargs)
+
+  ms = sysid.ModelSequences(
+      "spring_mass",
+      spec,
+      "measured",
+      initial_state,
+      control_ts,
+      sensor_ts,
+  )
+  residual_fn = sysid.build_residual_fn(
+      models_sequences=[ms], custom_rollout=custom_rollout
+  )
+  opt_params, opt_result = sysid.optimize(
+      initial_params=params,
+      residual_fn=residual_fn,
+      optimizer="mujoco",
+  )
+  initial_mass = params["mass"].value[0]
+  nominal_mass = params["mass"].nominal[0]
+  opt_mass = opt_params["mass"].value[0]
+
+  # Clear the accumulated rollout masses from the optimization.
+  # They will be populated again from the video report.
+  rollout_masses.clear()
+  with tempfile.TemporaryDirectory() as tmpdir:
+    sysid.default_report(
+        models_sequences=[ms],
+        initial_params=params,
+        opt_params=opt_params,
+        residual_fn=residual_fn,
+        opt_result=opt_result,
+        save_path=pathlib.Path(tmpdir),
+        custom_rollout=custom_rollout,
+    )
+    assert (pathlib.Path(tmpdir) / "video_all.mp4").exists()
+
+  # default_report renders three videos before evaluating residuals. Each
+  # video rolls out one model per overlay, in initial/nominal/optimized order.
+  np.testing.assert_allclose(
+      rollout_masses[0], [initial_mass, nominal_mass, opt_mass]
+  )  # video_all.mp4
+  np.testing.assert_allclose(
+      rollout_masses[1], [initial_mass, nominal_mass]
+  )  # video_init.mp4
+  np.testing.assert_allclose(
+      rollout_masses[2], [nominal_mass, opt_mass]
+  )  # video_opt.mp4
+
+
 def test_arm_recover_armature():
   """Recover 5 joint armature values and verify save_results."""
   spec, initial_state, control_ts, sensor_ts = _generate_data(

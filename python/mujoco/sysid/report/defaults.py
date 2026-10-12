@@ -21,6 +21,7 @@ from mujoco.sysid._src import model_modifier
 from mujoco.sysid._src import parameter
 from mujoco.sysid._src.optimize import calculate_intervals
 from mujoco.sysid._src.residual import BuildModelFn
+from mujoco.sysid._src.residual import CustomRolloutFn
 from mujoco.sysid._src.trajectory import ModelSequences
 from mujoco.sysid.report.builder import ReportBuilder
 from mujoco.sysid.report.sections.covariance import Covariance
@@ -41,10 +42,14 @@ def default_report(
     save_path=None,
     build_model: BuildModelFn | None = model_modifier.apply_param_modifiers,
     generate_videos=True,
+    custom_rollout: CustomRolloutFn | None = None,
 ) -> ReportBuilder:
   """Returns a ReportBuilder containing experiment results.
 
   Users needing a custom report can copy and modify this code.
+
+  Pass the same ``custom_rollout`` given to :func:`build_residual_fn` so the
+  rendered videos match the rollouts used during optimization.
   """
   from mujoco.sysid.report.sections.group import GroupSection
   from mujoco.sysid.report.sections.insights import AutomatedInsights
@@ -93,6 +98,7 @@ def default_report(
         model_spec=model_spec_to_render,
         output_filepath=video_all_path,
         fps=60,
+        custom_rollout=custom_rollout,
     )
 
     # Video 2: Initial + Nominal (no optimized)
@@ -106,6 +112,7 @@ def default_report(
         output_filepath=video_init_path,
         render_opt=False,
         fps=60,
+        custom_rollout=custom_rollout,
     )
 
     # Video 3: Optimized + Nominal (no initial)
@@ -119,6 +126,7 @@ def default_report(
         output_filepath=video_opt_path,
         render_initial=False,
         fps=60,
+        custom_rollout=custom_rollout,
     )
 
     video_all_section = VideoPlayer(

@@ -15,6 +15,7 @@
 """Video report section for system identification results."""
 
 from collections.abc import Callable
+from collections.abc import Sequence
 import os
 import pathlib
 from typing import Any
@@ -23,9 +24,11 @@ import mujoco
 import mujoco.rollout
 from mujoco.sysid._src import model_modifier
 from mujoco.sysid._src import parameter
+from mujoco.sysid._src import timeseries
 from mujoco.sysid._src.plotting import render_rollout
 from mujoco.sysid._src.trajectory import SystemTrajectory
 from mujoco.sysid.report.sections.base import ReportSection
+import numpy as np
 
 
 def spec_apply(spec, attrs, values):
@@ -57,6 +60,7 @@ def generate_video_from_trajectories(
     fovy: float = 60,
     camera: str | int = -1,
     fps: int = 60,
+    custom_rollout: Callable[..., Sequence[SystemTrajectory]] | None = None,
 ) -> pathlib.Path:
   """Render trajectories and concatenate into a single video.
 
@@ -78,6 +82,10 @@ def generate_video_from_trajectories(
     fovy: Vertical field of view in degrees.
     camera: Camera index or name.
     fps: Frames per second.
+    custom_rollout: Optional replacement for the default rollout, with the same
+      signature as the ``custom_rollout`` passed to the residual function. Pass
+      the same function used during optimization so the rendered motion
+      matches the fitted predictions.
 
   Returns:
     Path to the saved video file.
@@ -89,6 +97,7 @@ def generate_video_from_trajectories(
     # Build models for this trajectory
     models = []
     datas = []
+    param_dicts = []
 
     nominal_params = initial_params.copy()
     nominal_params.reset()
@@ -104,6 +113,7 @@ def generate_video_from_trajectories(
       initial_data = mujoco.MjData(initial_model)
       models.append(initial_model)
       datas.append(initial_data)
+      param_dicts.append(initial_params)
 
     # nominal
     if render_nominal:
@@ -116,6 +126,7 @@ def generate_video_from_trajectories(
       nominal_data = mujoco.MjData(nominal_model)
       models.append(nominal_model)
       datas.append(nominal_data)
+      param_dicts.append(nominal_params)
 
     # pred
     if render_opt:
@@ -128,11 +139,38 @@ def generate_video_from_trajectories(
       pred_data = mujoco.MjData(pred_model)
       models.append(pred_model)
       datas.append(pred_data)
+      param_dicts.append(opt_params)
 
     control_ts = traj.control.resample(target_dt=models[0].opt.timestep)
-    state, _ = mujoco.rollout.rollout(
-        models, datas, traj.initial_state, control_ts.data
-    )
+    if custom_rollout is None:
+      state, _ = mujoco.rollout.rollout(
+          models, datas, traj.initial_state, control_ts.data
+      )
+    else:
+      qpos_map, qvel_map, act_map, ctrl_map = (
+          timeseries.TimeSeries.compute_all_state_mappings(models[0])
+      )
+      pred_trajectories = custom_rollout(
+          models=models,
+          datas=datas,
+          control_signal=[control_ts] * len(models),
+          initial_states=[traj.initial_state] * len(models),
+          param_dicts=param_dicts,
+          rollout_signal_mapping=(
+              timeseries.TimeSeries.compute_all_sensor_mapping(models[0])
+          ),
+          rollout_state_mapping=qpos_map | qvel_map | act_map,
+          ctrl_mapping=ctrl_map,
+      )
+      states = []
+      for pred_traj in pred_trajectories:
+        if pred_traj.state is None:
+          raise ValueError(
+              "custom_rollout must return trajectories with state to render"
+              " videos."
+          )
+        states.append(pred_traj.state.data)
+      state = np.stack(states, axis=0)
     models[0].vis.global_.fovy = fovy
     models[0].vis.global_.offwidth = width
     models[0].vis.global_.offheight = height
